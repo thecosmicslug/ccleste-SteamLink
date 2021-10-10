@@ -1,0 +1,2 @@
+./ccleste > ccleste.log
+
