@@ -115,10 +115,8 @@ static Uint32 getpixel(SDL_Surface *surface, int x, int y) {
 
 		case 4:
 			return *(Uint32 *)p;
-
-		default:
-			return 0;	   /* shouldn't happen, but avoids warnings */
 	}
+	return 0;
 }
 
 static void loadbmpscale(char* filename, SDL_Surface** s) {
@@ -147,7 +145,7 @@ static void loadbmpscale(char* filename, SDL_Surface** s) {
 	SDL_FreeSurface(bmp);
 	SDL_SetPalette(surf, SDL_PHYSPAL | SDL_LOGPAL, (SDL_Color*)base_palette, 0, 16);
 	SDL_SetColorKey(surf, SDL_SRCCOLORKEY, 0);
-	//SDL_SaveBMP(_S, #_S "x.bmp");
+
 	*s = surf;
 }
 
@@ -240,6 +238,39 @@ static Mix_Music* game_state_music = NULL;
 static void mainLoop(void);
 static FILE* TAS = NULL;
 
+#ifdef _3DS
+// hack: newer SDL versions remove SDL_N3DSKeyBind, but I'm too lazy to change the
+// code to properly use SDL_Joystick inputs on 3DS so work around it ...
+static short n3ds_key_map[32];
+
+static void SDL_N3DSKeyBind(int n3dskey, int kbkey) {
+	for (int i = 0; i < 32; i++)
+		if (n3dskey & (1u << i))
+			n3ds_key_map[i] = kbkey;
+}
+#define SDL_GetKeyState n3ds_get_fake_key_state
+static Uint8 *n3ds_get_fake_key_state(int *numkeys) {
+	static Uint8 st[SDLK_LAST];
+	if (numkeys) *numkeys = SDLK_LAST;
+
+	memset(st, 0, sizeof st);
+	hidScanInput();
+	Uint32 down = hidKeysDown();
+	Uint32 held = hidKeysHeld();
+	for (int i = 0; i < 32; i++) {
+		st[n3ds_key_map[i]] |= (held & (1u << i)) != 0;
+		if (down & (1u << i)) {
+			SDL_Event ev;
+			ev.type = SDL_KEYDOWN;
+			ev.key.keysym.sym = n3ds_key_map[i];
+			SDL_PushEvent(&ev);
+		}
+	}
+
+	return st;
+}
+#endif
+
 int main(int argc, char** argv) {
 	SDL_CHECK(SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO) == 0);
 #if SDL_MAJOR_VERSION >= 2
@@ -251,10 +282,12 @@ int main(int argc, char** argv) {
 	fsInit();
 	romfsInit();
 	videoflag = SDL_DOUBLEBUF | SDL_HWSURFACE | SDL_CONSOLEBOTTOM | SDL_TOPSCR;
-	SDL_N3DSKeyBind(KEY_CPAD_UP|KEY_CSTICK_UP, SDLK_UP);
-	SDL_N3DSKeyBind(KEY_CPAD_DOWN|KEY_CSTICK_DOWN, SDLK_DOWN);
-	SDL_N3DSKeyBind(KEY_CPAD_LEFT|KEY_CSTICK_LEFT, SDLK_LEFT);
-	SDL_N3DSKeyBind(KEY_CPAD_RIGHT|KEY_CSTICK_RIGHT, SDLK_RIGHT);
+	SDL_N3DSKeyBind(KEY_A, SDLK_z);
+	SDL_N3DSKeyBind(KEY_X|KEY_B, SDLK_x);
+	SDL_N3DSKeyBind(KEY_CPAD_UP|KEY_CSTICK_UP|KEY_DUP, SDLK_UP);
+	SDL_N3DSKeyBind(KEY_CPAD_DOWN|KEY_CSTICK_DOWN|KEY_DDOWN, SDLK_DOWN);
+	SDL_N3DSKeyBind(KEY_CPAD_LEFT|KEY_CSTICK_LEFT|KEY_DLEFT, SDLK_LEFT);
+	SDL_N3DSKeyBind(KEY_CPAD_RIGHT|KEY_CSTICK_RIGHT|KEY_DRIGHT, SDLK_RIGHT);
 	SDL_N3DSKeyBind(KEY_SELECT, SDLK_F11); //to switch full screen
 	SDL_N3DSKeyBind(KEY_START, SDLK_ESCAPE); //to pause
 	
@@ -305,8 +338,7 @@ int main(int argc, char** argv) {
 			0xf0,0x3c,0xf0,0x00,0x00,0x00,0x40,0x00,0x12,0x00,0x00,0x00,
 			0x00,0x00,0xc0,0x00,0x10,0x00,0x00,0x00,0x00,0x00
 		};
-		const unsigned int loading_bmp_len = 202;
-		SDL_RWops* rw = SDL_RWFromConstMem(loading_bmp, loading_bmp_len);
+		SDL_RWops* rw = SDL_RWFromConstMem(loading_bmp, sizeof loading_bmp);
 		SDL_Surface* loading = SDL_LoadBMP_RW(rw, 1);
 		if (!loading) goto skip_load;
 
@@ -345,7 +377,9 @@ int main(int argc, char** argv) {
 		if (start_fullscreen_f) fclose(start_fullscreen_f);
 	}
 
-#ifndef EMSCRIPTEN
+#ifdef _3DS
+	while (aptMainLoop()) mainLoop();
+#elif !defined(EMSCRIPTEN)
 	while (running) mainLoop();
 #else
 #include <emscripten.h>
@@ -403,6 +437,7 @@ static void mainLoop(void) {
 			OSDset("reset");
 			paused = 0;
 			Celeste_P8_load_state(initial_game_state);
+			Celeste_P8_set_rndseed((unsigned)(time(NULL) + SDL_GetTicks()));
 			Mix_HaltChannel(-1);
 			Mix_HaltMusic();
 			Celeste_P8_init();
@@ -502,8 +537,8 @@ static void mainLoop(void) {
 		if (kbstate[SDLK_RIGHT]) buttons_state |= (1<<1);
 		if (kbstate[SDLK_UP])    buttons_state |= (1<<2);
 		if (kbstate[SDLK_DOWN])  buttons_state |= (1<<3);
-		if (kbstate[SDLK_z] || kbstate[SDLK_c] || kbstate[SDLK_n] || kbstate[SDLK_a]) buttons_state |= (1<<4);
-		if (kbstate[SDLK_x] || kbstate[SDLK_v] || kbstate[SDLK_m] || kbstate[SDLK_b]) buttons_state |= (1<<5);
+		if (kbstate[SDLK_z] || kbstate[SDLK_c] || kbstate[SDLK_n]) buttons_state |= (1<<4);
+		if (kbstate[SDLK_x] || kbstate[SDLK_v] || kbstate[SDLK_m]) buttons_state |= (1<<5);
 	} else if (TAS && !paused) {
 		static int t = 0;
 		t++;
@@ -527,16 +562,12 @@ static void mainLoop(void) {
 	}
 	OSDdraw();
 
-	/*for (int i = 0 ; i < 16;i++) {
-		SDL_Rect rc = {i*8*scale, 0, 8*scale, 4*scale};
-		SDL_FillRect(screen, &rc, i);
-	}*/
-
 	SDL_Flip(screen);
 
-#if defined(_3DS) /*using SDL_DOUBLEBUF for videomode makes it so SDL_Flip waits for Vsync; so we dont have to delay manually*/ \
- || defined(EMSCRIPTEN) //emscripten_set_main_loop already sets the fps
+#ifdef EMSCRIPTEN //emscripten_set_main_loop already sets the fps
 	SDL_Delay(1);
+#elif defined(_3DS)
+	gspWaitForVBlank(), gspWaitForVBlank();
 #else
 	static int t = 0;
 	static unsigned frame_start = 0;
@@ -863,7 +894,6 @@ int pico8emu(CELESTE_P8_CALLBACK_TYPE call, ...) {
 					int tile = tilemap_data[x + mx + (y + my)*128];
 					//hack
 					if (mask == 0 || (mask == 4 && tile_flags[tile] == 4) || gettileflag(tile, mask != 4 ? mask-1 : mask)) {
-						//al_draw_bitmap(sprites[tile], tx+x*8 - camera_x, ty+y*8 - camera_y, 0);
 						SDL_Rect srcrc = {
 							8*(tile % 16),
 							8*(tile / 16)
@@ -883,7 +913,6 @@ int pico8emu(CELESTE_P8_CALLBACK_TYPE call, ...) {
 							dstrc.w = dstrc.h = 8;
 						}
 
-						//SDL_BlitSurface(gfx, &srcrc, screen, &dstrc);
 						Xblit(gfx, &srcrc, screen, &dstrc, 0, 0, 0);
 					}
 				}
